@@ -1,12 +1,14 @@
-name: midas-py310
+name: midas-py311
 channels:
   - pytorch
+  - nvidia
   - defaults
 dependencies:
-  - nvidia::cudatoolkit=11.7
   - python=3.10.8
-  - pytorch::pytorch=1.13.0
+  - pytorch=1.13.0
   - torchvision=0.14.0
+  - torchaudio=0.13.0
+  - pytorch-cuda=11.7
   - pip=22.3.1
   - numpy=1.23.4
   - pip:
@@ -14,3 +16,4 @@ dependencies:
     - imutils==0.5.4
     - timm==0.6.12
     - einops==0.6.0
+
