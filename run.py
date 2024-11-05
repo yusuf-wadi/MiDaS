@@ -12,6 +12,7 @@ import numpy as np
 
 from imutils.video import VideoStream
 from midas.model_loader import default_models, load_model
+from tqdm import tqdm
 
 first_execution = True
 def process(device, model, model_type, image, input_size, target_size, optimize, use_camera):
@@ -100,10 +101,57 @@ def create_side_by_side(image, depth, grayscale):
         return right_side
     else:
         return np.concatenate((image, right_side), axis=1)
+    
+def process_video(input_path, output_path, device, model, model_type, transform, net_w, net_h, optimize, side):
+    video_names = glob.glob(os.path.join(input_path, "*"))
+    print("Processing video:", video_names[0])
+    
+    video_in = cv2.VideoCapture(video_names[0])
+    fps = int(video_in.get(cv2.CAP_PROP_FPS))
+    width = int(video_in.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_in.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(video_in.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Define output video writers
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    side_by_side_out = cv2.VideoWriter(os.path.join(output_path, 'side_by_side.mp4'), fourcc, fps, (width*2, height))
+    depth_only_out = cv2.VideoWriter(os.path.join(output_path, 'depth_only.mp4'), fourcc, fps, (width, height))
+    
+    with torch.no_grad():
+        for _ in tqdm(range(total_frames), desc="Processing frames"):
+            ret, frame = video_in.read()
+            if not ret:
+                break
+            
+            original_image_rgb = np.flip(frame, 2)
+            image = transform({"image": original_image_rgb/255})["image"]
+            
+            prediction = process(device, model, model_type, image, (net_w, net_h),
+                                 original_image_rgb.shape[1::-1], optimize, True)
+            
+            # Create side-by-side view
+            if side:
+                original_image_bgr = np.flip(original_image_rgb, 2)
+                side_by_side = create_side_by_side(original_image_bgr, prediction, grayscale=False)
+                # Write frames to output videos
+                side_by_side_out.write(side_by_side)
+            
+            # Normalize depth map for visualization
+            depth_colored = cv2.applyColorMap(np.uint8((prediction - prediction.min()) / (prediction.max() - prediction.min()) * 255), cv2.COLORMAP_INFERNO)
+            
+            
+            depth_only_out.write(depth_colored)
+    
+    # Release resources
+    video_in.release()
+    side_by_side_out.release()
+    depth_only_out.release()
+    
+    print("Video processing complete. Output saved to:", output_path)
 
 
 def run(input_path, output_path, model_path, model_type="dpt_beit_large_512", optimize=False, side=False, height=None,
-        square=False, grayscale=False):
+        square=False, grayscale=False, video=False):
     """Run MonoDepthNN to compute depth maps.
 
     Args:
@@ -141,31 +189,37 @@ def run(input_path, output_path, model_path, model_type="dpt_beit_large_512", op
     if input_path is not None:
         if output_path is None:
             print("Warning: No output path specified. Images will be processed but not shown or stored anywhere.")
-        for index, image_name in enumerate(image_names):
+        if not video:
+            for index, image_name in enumerate(image_names):
 
-            print("  Processing {} ({}/{})".format(image_name, index + 1, num_images))
+                print("  Processing {} ({}/{})".format(image_name, index + 1, num_images))
 
-            # input
-            original_image_rgb = utils.read_image(image_name)  # in [0, 1]
-            image = transform({"image": original_image_rgb})["image"]
+                # input
+                original_image_rgb = utils.read_image(image_name)  # in [0, 1]
+                image = transform({"image": original_image_rgb})["image"]
 
-            # compute
-            with torch.no_grad():
-                prediction = process(device, model, model_type, image, (net_w, net_h), original_image_rgb.shape[1::-1],
-                                     optimize, False)
+                # compute
+                with torch.no_grad():
+                    prediction = process(device, model, model_type, image, (net_w, net_h), original_image_rgb.shape[1::-1],
+                                        optimize, False)
 
-            # output
-            if output_path is not None:
-                filename = os.path.join(
-                    output_path, os.path.splitext(os.path.basename(image_name))[0] + '-' + model_type
-                )
-                if not side:
-                    utils.write_depth(filename, prediction, grayscale, bits=2)
-                else:
-                    original_image_bgr = np.flip(original_image_rgb, 2)
-                    content = create_side_by_side(original_image_bgr*255, prediction, grayscale)
-                    cv2.imwrite(filename + ".png", content)
-                utils.write_pfm(filename + ".pfm", prediction.astype(np.float32))
+                # output
+                if output_path is not None:
+                    filename = os.path.join(
+                        output_path, os.path.splitext(os.path.basename(image_name))[0] + '-' + model_type
+                    )
+                    if not side:
+                        utils.write_depth(filename, prediction, grayscale, bits=2)
+                    else:
+                        original_image_bgr = np.flip(original_image_rgb, 2)
+                        content = create_side_by_side(original_image_bgr*255, prediction, grayscale)
+                        cv2.imwrite(filename + ".png", content)
+                    utils.write_pfm(filename + ".pfm", prediction.astype(np.float32))
+        else:
+            video_names = glob.glob(os.path.join(input_path, "*"))
+            print("  video: ", video_names)
+            process_video(input_path, output_path, device, model, model_type, transform, net_w, net_h, optimize, side)
+                        
 
     else:
         with torch.no_grad():
@@ -261,6 +315,8 @@ if __name__ == "__main__":
                              'depth values in PNGs but only 8-bit ones due to the precision limitation of this '
                              'colormap.'
                         )
+    
+    parser.add_argument('--video', dest='video', action='store_true', help='Use video stream as input')
 
     args = parser.parse_args()
 
@@ -274,4 +330,4 @@ if __name__ == "__main__":
 
     # compute depth maps
     run(args.input_path, args.output_path, args.model_weights, args.model_type, args.optimize, args.side, args.height,
-        args.square, args.grayscale)
+        args.square, args.grayscale, args.video)
